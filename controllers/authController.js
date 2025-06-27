@@ -1,45 +1,56 @@
-// controllers/authController.js
 const User = require('../models/User');
+const Organization = require('../models/Organization');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const sendEmail = require('../utils/sendEmail');
 
 exports.register = async (req, res) => {
-  const { name, email, password, role } = req.body;
+  const { name, email, password, organizationCode } = req.body;
+
   try {
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(400).json({ message: 'Email already registered' });
+    if (await User.findOne({ email })) {
+      return res.status(400).json({ message: 'Email already registered' });
+    }
+
+    const organization = await Organization.findOne({ code: organizationCode });
+    if (!organization || !organization.isVerified) {
+      return res.status(400).json({ message: 'Invalid or unverified organization code' });
+    }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const verificationToken = crypto.randomBytes(32).toString('hex');
 
-    const user = await User.create({
+    const newUser = new User({
       name,
       email,
       password: hashedPassword,
-      role: role || 'volunteer',
+      role: 'volunteer',
       verificationToken,
+      organization: organization._id
     });
 
-    const link = `${process.env.CLIENT_URL}/api/auth/verify/${verificationToken}`;
-    await sendEmail(user.email, 'Verify your email', `<a href="${link}">Click to verify</a>`);
+    await newUser.save();
+
+    const verificationLink = `${process.env.CLIENT_URL}/api/auth/verify/${verificationToken}`;
+    await sendEmail(email, 'Verify your email', `<a href="${verificationLink}">Click to verify</a>`);
 
     res.status(201).json({ message: 'Registered, please verify email' });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Registration failed' });
   }
 };
 
 exports.verifyEmail = async (req, res) => {
   try {
-    const user = await User.findOne({ verificationToken: req.params.token });
+    const user = await User.findOne({ verificationToken: req.params.token }).populate('organization');
     if (!user) return res.status(400).json({ message: 'Invalid token' });
 
     user.isVerified = true;
     user.verificationToken = undefined;
     await user.save();
+
+    await sendEmail(user.email, 'Registration Successful', `You have been successfully registered under the NGO: <strong>${user.organization.name}</strong>.`);
 
     res.send('Email verified successfully');
   } catch (err) {
@@ -75,7 +86,7 @@ exports.forgotPassword = async (req, res) => {
 
     const token = crypto.randomBytes(32).toString('hex');
     user.resetToken = token;
-    user.resetTokenExpire = Date.now() + 3600000; // 1 hour
+    user.resetTokenExpire = Date.now() + 3600000;
     await user.save();
 
     const link = `${process.env.CLIENT_URL}/api/auth/reset-password/${token}`;
